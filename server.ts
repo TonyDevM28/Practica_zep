@@ -16,22 +16,66 @@ const __dirname = path.dirname(__filename);
 
 // ─── Lógica del agente ────────────────────────────────────────────────────────
 
+async function getThreadContextOrCreate(
+  zep: ZepClient,
+  threadId: string
+): Promise<unknown> {
+  try {
+    // @ts-ignore
+    return await zep.thread.getUserContext(threadId);
+  } catch (err: unknown) {
+    const statusCode =
+      typeof err === "object" && err !== null && "statusCode" in err
+        ? err.statusCode
+        : undefined;
+
+    if (statusCode !== 404) throw err;
+
+    const userId = `usuario-${threadId}`;
+
+    try {
+      await zep.user.add({ userId });
+    } catch (userError: unknown) {
+      const userStatusCode =
+        typeof userError === "object" && userError !== null && "statusCode" in userError
+          ? userError.statusCode
+          : undefined;
+
+      if (userStatusCode !== 409) throw userError;
+    }
+
+    try {
+      await zep.thread.create({ threadId, userId });
+    } catch (threadError: unknown) {
+      const threadStatusCode =
+        typeof threadError === "object" && threadError !== null && "statusCode" in threadError
+          ? threadError.statusCode
+          : undefined;
+
+      if (threadStatusCode !== 409) throw threadError;
+      // Otro proceso pudo crear el thread mientras lo inicializábamos.
+      return await zep.thread.getUserContext(threadId);
+    }
+
+    return null;
+  }
+}
+
 async function chatWithAgent(
   mensaje: string,
   threadId: string
 ): Promise<string> {
   const zep = new ZepClient({ apiKey: process.env.ZEP_API_KEY });
 
-  // 1. Recuperamos el contexto de Zep
-  // @ts-ignore
-  const zepContext = await zep.thread.getUserContext(threadId);
+  // 1. Recuperamos el contexto de Zep o creamos el hilo si es nuevo
+  const zepContext = await getThreadContextOrCreate(zep, threadId);
   const hechosExtraidos = zepContext
     ? JSON.stringify(zepContext)
     : "Sin contexto previo.";
 
   // 2. Inicializamos LangChain con Gemini
   const llm = new ChatGoogleGenerativeAI({
-    model: "gemini-2.5-flash",
+    model: "gemini-3.6-flash",
     apiKey: process.env.GEMINI_API_KEY as string,
     temperature: 0.7,
   });
@@ -65,10 +109,8 @@ async function chatWithAgent(
   // @ts-ignore
   await zep.thread.addMessages(threadId, {
     messages: [
-      // @ts-ignore
-      { role: "user", roleType: "user", content: mensaje },
-      // @ts-ignore
-      { role: "assistant", roleType: "assistant", content: respuestaTexto },
+      { role: "user", content: mensaje },
+      { role: "assistant", content: respuestaTexto },
     ],
   });
 
@@ -85,6 +127,42 @@ app.use(express.json());
 
 // Sirve los archivos estáticos de /public
 app.use(express.static(path.join(__dirname, "public")));
+
+// Endpoint para recuperar el historial de mensajes de un hilo
+app.get("/history/:threadId", async (req: Request, res: Response) => {
+  const { threadId } = req.params;
+
+  if (!threadId) {
+    res.status(400).json({ error: "El campo 'threadId' es obligatorio." });
+    return;
+  }
+
+  try {
+    const zep = new ZepClient({ apiKey: process.env.ZEP_API_KEY });
+    const result = await zep.thread.get(threadId, { lastn: 100 });
+    const messages = (result.messages ?? []).map((m) => ({
+      role: m.role,
+      content: m.content,
+      createdAt: m.createdAt,
+    }));
+    res.json({ messages });
+  } catch (err: unknown) {
+    const statusCode =
+      typeof err === "object" && err !== null && "statusCode" in err
+        ? (err as { statusCode: number }).statusCode
+        : undefined;
+
+    // Si el hilo no existe todavía, devolvemos historial vacío
+    if (statusCode === 404) {
+      res.json({ messages: [] });
+      return;
+    }
+
+    const message = err instanceof Error ? err.message : "Error interno del servidor.";
+    console.error("Error en GET /history:", err);
+    res.status(500).json({ error: message });
+  }
+});
 
 // Endpoint principal del chat
 app.post("/chat", async (req: Request, res: Response) => {

@@ -119,6 +119,34 @@
       .empty-state .icon { font-size: 2.5rem; }
       .empty-state p { font-size: 0.9rem; }
 
+      /* Separador de historial */
+      .history-divider {
+        display: flex; align-items: center; gap: 10px;
+        color: var(--subtext); font-size: 0.72rem;
+        font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px;
+        margin: 4px 0 8px;
+      }
+      .history-divider::before,
+      .history-divider::after {
+        content: ''; flex: 1; height: 1px; background: var(--border);
+      }
+
+      /* Mensajes de historial (opacidad reducida para distinguirlos) */
+      .msg.history .bubble { opacity: 0.75; }
+      .msg.history .msg-time { opacity: 0.6; }
+
+      /* Spinner de carga del historial */
+      .history-loading {
+        display: flex; align-items: center; justify-content: center;
+        gap: 8px; color: var(--subtext); font-size: 0.82rem; padding: 16px;
+      }
+      .spinner {
+        width: 16px; height: 16px; border: 2px solid var(--border);
+        border-top-color: var(--accent); border-radius: 50%;
+        animation: spin 0.7s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+
       #input-area {
         display: flex; align-items: flex-end; gap: 10px;
         padding: 14px 16px; border-top: 1px solid var(--border);
@@ -189,7 +217,79 @@
       const threadIdEl = document.getElementById('thread-id');
       const emptyState = document.getElementById('empty-state');
 
-      // Auto-resize textarea
+      // ── Carga de historial ────────────────────────────────────────────────────
+
+      async function loadHistory(threadId) {
+        // Limpiamos el área de mensajes y mostramos el spinner
+        messagesEl.innerHTML = '';
+        const loadingEl = document.createElement('div');
+        loadingEl.className = 'history-loading';
+        loadingEl.id = 'history-loading';
+        loadingEl.innerHTML = '<div class="spinner"></div><span>Cargando historial…</span>';
+        messagesEl.appendChild(loadingEl);
+
+        try {
+          const res  = await fetch(`/history/${encodeURIComponent(threadId)}`);
+          const data = await res.json();
+
+          // Quitamos el spinner
+          const spinner = document.getElementById('history-loading');
+          if (spinner) spinner.remove();
+
+          if (!res.ok || !data.messages || data.messages.length === 0) {
+            messagesEl.appendChild(createEmptyState());
+            return;
+          }
+
+          // Separador visual "Historial guardado"
+          const divider = document.createElement('div');
+          divider.className = 'history-divider';
+          divider.textContent = `Historial guardado · ${data.messages.length} mensajes`;
+          messagesEl.appendChild(divider);
+
+          // Renderizamos cada mensaje del historial
+          data.messages.forEach(msg => {
+            const roleClass = msg.role === 'user' ? 'user' : 'bot';
+            appendMessage(roleClass, msg.content, msg.createdAt, true);
+          });
+
+          // Separador "Nueva sesión"
+          const newDivider = document.createElement('div');
+          newDivider.className = 'history-divider';
+          newDivider.textContent = 'Nueva sesión';
+          messagesEl.appendChild(newDivider);
+
+          scrollToBottom();
+        } catch (err) {
+          const spinner = document.getElementById('history-loading');
+          if (spinner) spinner.remove();
+          messagesEl.appendChild(createEmptyState());
+        }
+      }
+
+      function createEmptyState() {
+        const el = document.createElement('div');
+        el.className = 'empty-state';
+        el.id = 'empty-state';
+        el.innerHTML = '<div class="icon">💬</div><p>Escribe un mensaje para comenzar.<br/>Zep recordará el contexto de esta sesión.</p>';
+        return el;
+      }
+
+      // Cargamos el historial con el threadId inicial al arrancar
+      loadHistory(threadIdEl.value.trim() || 'hilo_practica_01');
+
+      // Recargamos si el usuario cambia el threadId (al salir del campo)
+      let previousThreadId = threadIdEl.value.trim();
+      threadIdEl.addEventListener('change', () => {
+        const newId = threadIdEl.value.trim() || 'hilo_practica_01';
+        if (newId !== previousThreadId) {
+          previousThreadId = newId;
+          loadHistory(newId);
+        }
+      });
+
+      // ── Auto-resize textarea ─────────────────────────────────────────────────
+
       inputEl.addEventListener('input', () => {
         inputEl.style.height = 'auto';
         inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + 'px';
@@ -202,15 +302,18 @@
 
       sendBtn.addEventListener('click', sendMessage);
 
-      function getTime() {
-        return new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+      function getTime(isoDate) {
+        const d = isoDate ? new Date(isoDate) : new Date();
+        return d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
       }
 
-      function appendMessage(role, text) {
-        if (emptyState) emptyState.style.display = 'none';
+      function appendMessage(role, text, isoDate, isHistory = false) {
+        // Ocultamos el empty-state si sigue visible
+        const es = document.getElementById('empty-state');
+        if (es) es.style.display = 'none';
 
         const wrapper = document.createElement('div');
-        wrapper.className = `msg ${role}`;
+        wrapper.className = `msg ${role}${isHistory ? ' history' : ''}`;
 
         const bubble = document.createElement('div');
         bubble.className = 'bubble';
@@ -218,7 +321,7 @@
 
         const time = document.createElement('span');
         time.className = 'msg-time';
-        time.textContent = getTime();
+        time.textContent = getTime(isoDate);
 
         wrapper.appendChild(bubble);
         wrapper.appendChild(time);
